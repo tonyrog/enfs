@@ -8,65 +8,97 @@
 -module(nfs_procfs).
 -author('luke@bluetail.com').
 
--export([start_link/0, root/0, getattr/1, lookup/2, dirlist/1, read/1,
+-export([start_link/0]).
+
+-behaviour(nfs_server).
+
+-export([init/1,
+	 terminate/1,
+	 getattr/1,
+	 setattr/2,
+	 lookup/2, 
+	 readlink/1,
+	 read/4, 
+	 write/5, 
+	 create/3,
+	 remove/2,
+	 rename/4,
+	 link/3,
+	 symlink/4,
+	 mkdir/3,
+	 rmdir/2,
+	 readdir/2,
 	 statfs/1]).
 
+-record(procfs_state,
+	{
+	  options = [],
+	  root = root
+	}).
+
 start_link() ->
-    {ok, Pid} = nfs_server:start_link(),
-    nfs_server:add_mountpoint("/procfs", ?MODULE),
+    Pid = case nfs_server:start_link() of
+	      {ok,Pid0} -> Pid0;
+	      {error,{already_started,Pid0}} -> Pid0
+	  end,
+    ok = nfs_server:add_mountpoint("/procfs", ?MODULE, []),
     {ok, Pid}.
 
 %% Returns: ID of root directory, any erlang term.
-root() ->
-    root.
+init(Options) ->
+    {root, #procfs_state{ options=Options}}.
 
+terminate(#procfs_state{}) ->
+    ok.
+
+%% return (partial) attribute list
 getattr(root) ->
-    %% Returns: {dir, Access}
-    %%        | {file, Access, Timestamp, Size}
-    %% Access = r | rw | rx | rwx | w | wx | x
-    %% Timestamp = {Secs, MicroSecs} (used for atime/mtime/ctime)
-    %% Size = integer()
-    {dir, rx};
+    {ok, [{type,directory},{mode,{rx,rx,rx}}]};
 getattr({node, _N}) ->
-    {dir, rx};
+    {ok, [{type,directory},{mode,{rx,rx,rx}}]};
 getattr({pid, _P}) ->
-    {dir, rx};
+    {ok, [{type,directory},{mode,{rx,rx,rx}}]};
 getattr({registered, _N, _P}) ->
-    {dir, rx};
+    {ok,[{type,directory},{mode,{rx,rx,rx}}]};
 getattr(ID) ->
-    {file, r, now_timestamp(), filesize(ID)}.
+    Time = timestamp(),
+    Size = filesize(ID),
+    {ok, [{type,regular},{mode,{r,r,r}},
+	  {size, Size},
+	  {ctime, Time}, {mtime, Time}, {atime, Time}]}.
 
-dirlist(root) ->
+setattr(_ID, _Attrs) ->
+    {error, eacces}.
+
+readdir(root, _Count) ->
     {ok, [atom_to_list(Node) || Node <- [node()] ++ nodes()]};
-
-dirlist({node, Node}) ->
+readdir({node, Node}, _Count) ->
     case rpc:call(Node, erlang, processes, []) of
 	{badrpc, _} ->
-	    {error, io};
+	    {error, eio};
 	Procs ->
 	    case rpc:call(Node, erlang, registered, []) of
 		{badrpc, _} ->
-		    {error, io};
+		    {error, eio};
 		Regs ->
 		    ProcNms = [erlang:pid_to_list(P) -- "<>" || P <- Procs],
 		    Registered = [atom_to_list(R) || R <- Regs],
 		    {ok, ProcNms ++ Registered}
 	    end
     end;
-
-dirlist({registered, Node, R}) ->
+readdir({registered, Node, R}, _Count) ->
     case rpc:call(Node, erlang, whereis, [R]) of
 	undefined ->
-	    {error, noent};
+	    {error, enoent};
 	{badrpc, _} ->
-	    {error, io};
+	    {error, eio};
 	Pid when is_pid(Pid) ->
-	    dirlist({pid, Pid})
+	    readdir({pid, Pid}, 8192)
     end;
-dirlist({pid, P}) ->
+readdir({pid, P}, _Count) ->
     case rpc:call(node(P), erlang, process_info, [P]) of
 	{badrpc, _} ->
-	    {error, io};
+	    {error, eio};
 	Info ->
 	    {ok, [atom_to_list(A) || {A, _} <- Info]}
     end.
@@ -83,7 +115,7 @@ lookup(root, Child) ->
 	    Node = list_to_atom(Child),
 	    case net_adm:ping(Node) of
 		pang ->
-		    {error, noent};
+		    {error, enoent};
 		pong ->
 		    {ok, {node,Node}}
 	    end
@@ -102,15 +134,43 @@ lookup({registered, Node, R}, Child) ->
 lookup({pid, P}, Child) ->
     {ok, {property, {pid, P}, list_to_atom(Child)}}.
 
-read({property, metadata_never_index, value}) ->
+readlink(_Name) ->
+    {error, eacces}.
+
+read({property, metadata_never_index, value},_Offset,_Count,_TotalCount) ->
     {ok, "1"};
-read({property, P, Name}) ->
+read({property, P, Name},_Offset,_Count,_TotalCount) ->
     case get_process_info(P, Name) of
 	undefined ->
-	    {error, noent};
+	    {error, enoent};
 	{_, Value} ->
 	    {ok, io_lib:format("~p~n", [Value])}
     end.
+
+write(_ID,_BeginOffset,_Offset,_TotalCount,_Data) ->
+    {error, eacces}.
+
+create(_DirID, _Name, _Attr) ->
+    {error, eacces}.
+
+remove(_DirID, _NAme) ->    
+    {error, eacces}.
+
+rename(_DirFrom, _NameFrom, _DirTo, _NameTo) ->    
+    {error, eacces}.
+
+link(_FromID, _ToID, _ToName) ->
+    {error, eacces}.
+
+symlink(_FromID, _FromName, _ToName, _SAttr) ->
+    {error, eacces}.
+
+mkdir(_DirID, _Name, _Attr) ->
+    {error, eacces}.
+
+rmdir(_DirID, _Name) ->
+    {error, eacces}.    
+
 
 get_process_info({pid, P}, Name) ->
     case rpc:call(node(P), erlang, process_info, [P, Name]) of
@@ -130,14 +190,14 @@ get_process_info({registered, Node, R}, Name) ->
     end.
 
 filesize(ID = {property, _P, _Name}) ->
-    case read(ID) of
+    case read(ID,0,8192,8192) of
 	{ok, IOList} ->
-	    size(list_to_binary([IOList]));
+	    erlang:iolist_size(IOList);
 	_ ->
 	    0
     end.
 
-now_timestamp() ->
+timestamp() ->
     {Mega, Sec, Micro} = os:timestamp(),
     {((Mega * 1000000) + Sec) band 16#ffffffff, Micro}.
 
@@ -153,7 +213,7 @@ now_timestamp() ->
 %%       Bavail  The number of "bsize" blocks available to non-privileged
 %%               users.
 
-statfs(_) ->
+statfs(_ID) ->
     %% 65535? is a bita strange
     {ok, {1024, 1024, 1024, 0, 0}}.	% pulled out of the air
 

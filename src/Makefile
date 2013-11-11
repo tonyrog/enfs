@@ -1,6 +1,6 @@
 # Some modules are automatically generated, so we won't use the
 # include makefile's auto-detected list.
-MODULES := nfs_svc nfs_xdr nfs_server nfs_procfs
+MODULES := nfs_svc nfs_xdr nfs_server nfs_procfs nfs_filefs
 ERLC = erlc
 EBIN = ../ebin
 OBJECTS := $(MODULES:%=$(EBIN)/%.beam)
