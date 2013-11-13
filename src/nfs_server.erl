@@ -141,7 +141,11 @@ init([]) ->
     ?dbg("starting", []),
     start_mountd(),
     start_nfsd(),
-    init_tabs(),
+    ets:new(?fh_id_tab,    [named_table, public, set]),
+    ets:new(?id_fh_tab,    [named_table, public, set]),
+    ets:new(?fsid_mod_tab, [named_table, public, set]),
+    ets:new(?misc_tab,     [named_table, public, set]),
+    ets:insert(?misc_tab,  {next_fsid, 0}),
     ?dbg("init done", []),
     {ok, #state{ fh_suffix = make_suffix(),
 		 mountpoints=[],
@@ -243,39 +247,11 @@ handle_call_({nfsproc_null_2, _Client}, _From, State) ->
     {reply, {nfs_stat(ok), void}, State};
 
 handle_call_({nfsproc_getattr_2, FH, _Client}, _From, State) ->
-    R = case fh2id(FH) of
-	    {ok, _ID} ->
-		Mod = fh2mod(FH),
-		case fattr(FH, Mod, State) of
-		    {ok, FA} ->
-			{nfs_stat(ok), FA};
-		    {error, Error} ->
-			{nfs_stat(Error), void}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_getattr(fh_arg(FH,State), State),
     {reply, R, State};
 
 handle_call_({nfsproc_setattr_2, {FH, Attrs}, _Client}, _From, State) ->
-    R = case fh2id(FH) of
-	    {ok, ID} ->
-		Mod = fh2mod(FH),
-		Loc  = fh2local(FH,State),
-		case callback(Mod, setattr, [ID,Attrs,Loc]) of
-		    ok ->
-			case fattr(FH, Mod, State) of
-			    {ok, FA} ->
-				{nfs_stat(ok), FA};
-			    {error, Error} ->
-				{nfs_stat(Error), void}
-			end;
-		    {error, Reason} ->
-			{nfs_stat(Reason), void}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_setattr(fh_arg(FH,State), Attrs, State),
     {reply, R, State};    
 
 %% Obsolte (rfc1094)
@@ -283,68 +259,17 @@ handle_call_({nfsproc_root_2, _Client}, _From, State) ->
     {reply, void, State};
 
 handle_call_({nfsproc_lookup_2, {DirFH, NameBin}, _C}, _From, State) ->
-    R = case fh2id(DirFH) of
-	    {ok, DirID} ->
-		Name = binary_to_list(NameBin),
-		Mod = fh2mod(DirFH),
-		Loc  = fh2local(DirFH,State),
-		case callback(Mod, lookup, [DirID,Name,Loc]) of
-		    {error, Error} ->
-			{nfs_stat(Error), void};
-		    {ok, ChildID} ->
-			{ok, ChildFH} = id2fh(ChildID,fh2fsid(DirFH),State),
-			case fattr(ChildFH, Mod, State) of
-			    {ok, FA} ->
-				{nfs_stat(ok), {ChildFH, FA}};
-			    {error, Error} ->
-				{nfs_stat(Error), void}
-			end
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_lookup(fh_arg(DirFH,State), string_arg(NameBin), State),
     {reply, R, State};
-
 
 handle_call_({nfsproc_readlink_2, FH,_C},
 	     _From,State) ->
-    R = case fh2id(FH) of
-	    {ok, ID} ->
-		Mod = fh2mod(FH),
-		Loc  = fh2local(FH,State),
-		case callback(Mod, readlink, [ID,Loc]) of
-		    {ok, Path} ->
-			{nfs_stat(ok),erlang:iolist_to_binary(Path)};
-		    {error, Reason} ->
-			{nfs_stat(Reason), void}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_readlink(fh_arg(FH,State), State),
     {reply, R, State};
 
 handle_call_({nfsproc_read_2, {FH, Offset, Count, TotalCount},_C},
 	     _From,State) ->
-    R = case fh2id(FH) of
-	    {ok, ID} ->
-		Mod = fh2mod(FH),
-		Loc  = fh2local(FH,State),
-		case callback(Mod, read, [ID,Offset,Count,TotalCount,Loc]) of
-		    {ok, IOList} ->
-			case fattr(FH, Mod, State) of
-			    {ok, FA} ->
-				BIOList = erlang:iolist_to_binary(IOList),
-				{nfs_stat(ok), {FA,BIOList}};
-			    {error, Error} ->
-				{nfs_stat(Error), void}
-			end;
-		    {error, Reason} ->
-			{nfs_stat(Reason), void}
-
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_read(fh_arg(FH,State),Offset,Count,TotalCount,State),
     {reply, R, State};
 
 %% just decribed to be implemented in the future ?
@@ -353,213 +278,57 @@ handle_call_({nfsproc_writecache_2, _Client}, _From, State) ->
 
 handle_call_({nfsproc_write_2, {FH, BeginOffset, Offset, TotalCount, Data},_C},
 	     _From,State) ->
-    R = case fh2id(FH) of
-	    {ok, ID} ->
-		Mod = fh2mod(FH),
-		Loc  = fh2local(FH,State),
-		case callback(Mod, write, [ID,BeginOffset,Offset,TotalCount,
-					   Data,Loc]) of
-		    ok ->
-			case fattr(FH, Mod, State) of
-			    {ok, FA} ->
-				{nfs_stat(ok), FA};
-			    {error, Error} ->
-				{nfs_stat(Error), void}
-			end;
-		    {error, Reason} ->
-			{nfs_stat(Reason), void}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_write(fh_arg(FH,State), BeginOffset, Offset, 
+		      TotalCount, Data, State),    
     {reply, R, State};
 
 handle_call_({nfsproc_create_2, {{DirFH, NameBin},Attr}, _Client},
 	     _From, State) ->
-    R = case fh2id(DirFH) of
-	    {ok, DirID} ->
-		Name = binary_to_list(NameBin),
-		Mod = fh2mod(DirFH),
-		Loc  = fh2local(DirFH,State),
-		case callback(Mod, create, [DirID, Name, Attr, Loc]) of
-		    {ok, ChildID} ->
-			{ok, ChildFH} = id2fh(ChildID,fh2fsid(DirFH),State),
-			case fattr(ChildFH, Mod, State) of
-			    {ok, FA} ->
-				{nfs_stat(ok), {ChildFH, FA}};
-			    {error, Error} ->
-				{nfs_stat(Error), void}
-			end;
-		    {error, Error} ->
-			{nfs_stat(Error), void}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_create(fh_arg(DirFH,State),string_arg(NameBin),Attr,State),
     {reply, R, State};
 
 handle_call_({nfsproc_remove_2, {DirFH, NameBin}, _Client},_From, State) ->
-    R = case fh2id(DirFH) of
-	    {ok, DirID} ->
-		Name = binary_to_list(NameBin),
-		Mod = fh2mod(DirFH),
-		Loc  = fh2local(DirFH,State),
-		case callback(Mod, remove, [DirID, Name, Loc]) of
-		    {error, Error} ->
-			nfs_stat(Error);
-		    ok ->
-			nfs_stat(ok)
-		end;
-	    error ->
-		nfs_stat(estale)
-	end,
+    R = nfsproc_remove(fh_arg(DirFH,State),string_arg(NameBin), State),
     {reply, R, State};
-
 
 handle_call_({nfsproc_rename_2,{DirFromFH,FromBin},{DirToFH,ToBin},_Client},
 	     _From, State) ->
-    R = case {fh2id(DirFromFH),fh2id(DirToFH)} of
-	    {{ok, DirFromID},{ok,DirToID}} ->
-		From = binary_to_list(FromBin),
-		To = binary_to_list(ToBin),
-		ModFrom = fh2mod(DirFromFH),
-		ModTo = fh2mod(DirToFH),
-		if ModFrom =:= ModTo ->
-			Loc  = fh2local(DirFromFH,State),
-			case callback(ModFrom, rename, [DirFromID,From,
-							DirToID,To,Loc]) of
-			    {error, Error} ->
-				nfs_stat(Error);
-			    ok ->
-				nfs_stat(ok)
-			end;
-		   true -> %% must be in same space (FIXME)
-			nfs_stat(nxio)
-		end;
-	    {_, error} -> nfs_stat(estale);
-	    {error,_}  -> nfs_stat(estale)
-	end,
+    R = nfsproc_rename(fh_arg(DirFromFH,State),string_arg(FromBin),
+		       fh_arg(DirToFH,State),string_arg(ToBin),State),
     {reply, R, State};
 
 handle_call_({nfsproc_link_2,{FromFH,ToFH,ToNameBin},_Client},
 	     _From, State) ->
-    R = case {fh2id(FromFH),fh2id(ToFH)} of
-	    {{ok, FromID},{ok,ToID}} ->
-		ModFrom = fh2mod(FromFH),
-		ModTo = fh2mod(ToFH),
-		ToName = binary_to_list(ToNameBin),
-		if ModFrom =:= ModTo ->
-			Loc  = fh2local(FromFH,State),
-			case callback(ModFrom, link, [FromID,ToID,ToName,
-						      Loc]) of
-			    {error, Error} ->
-				nfs_stat(Error);
-			    ok ->
-				nfs_stat(ok)
-			end;
-		   true -> %% must be in same space (FIXME)
-			nfs_stat(nxio)
-		end;
-	    {_, error} -> nfs_stat(estale);
-	    {error,_}  -> nfs_stat(estale)
-	end,
+    R = nfsproc_link(fh_arg(FromFH,State),
+		     fh_arg(ToFH,State),string_arg(ToNameBin),State),
     {reply, R, State};
 
 handle_call_({nfsproc_symlink_2,{FromFH,FromNameBin,ToPathBin,SAttr},_Client},
 	     _From, State) ->
-    R = case fh2id(FromFH) of
-	    {ok, FromID} ->
-		Mod = fh2mod(FromFH),
-		FromName = binary_to_list(FromNameBin),
-		ToPath = binary_to_list(ToPathBin),
-		Loc  = fh2local(FromFH,State),
-		case callback(Mod, symlink, [FromID,FromName,ToPath,SAttr,
-					     Loc]) of
-		    {error, Error} ->
-			nfs_stat(Error);
-		    ok ->
-			nfs_stat(ok)
-		end;
-	    error  -> nfs_stat(estale)
-	end,
+    R = nfsproc_symlink(fh_arg(FromFH,State),
+			string_arg(FromNameBin),
+			string_arg(ToPathBin),SAttr,State),
     {reply, R, State};
 
 handle_call_({nfsproc_mkdir_2, {{DirFH, NameBin},Attr}, _Client},
 	     _From, State) ->
-    R = case fh2id(DirFH) of
-	    {ok, DirID} ->
-		Name = binary_to_list(NameBin),
-		Mod = fh2mod(DirFH),
-		Loc  = fh2local(DirFH,State),
-		case callback(Mod, mkdir, [DirID, Name, Attr, Loc]) of
-		    {error, Error} ->
-			{nfs_stat(Error), void};
-		    {ok, ChildID} ->
-			{ok, ChildFH} = id2fh(ChildID,fh2fsid(DirFH),State),
-			case fattr(ChildFH, Mod, State) of
-			    {ok, FA} ->
-				{nfs_stat(ok), {ChildFH, FA}};
-			    {error, Error} ->
-				{nfs_stat(Error), void}
-			end
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_mkdir(fh_arg(DirFH,State),
+		      string_arg(NameBin), Attr, State),
     {reply, R, State};
 
 handle_call_({nfsproc_rmdir_2, {DirFH, NameBin}, _Client},_From, State) ->
-    R = case fh2id(DirFH) of
-	    {ok, DirID} ->
-		Name = binary_to_list(NameBin),
-		Mod = fh2mod(DirFH),
-		Loc  = fh2local(DirFH,State),
-		case callback(Mod, rmdir, [DirID,Name,Loc]) of
-		    {error, Error} ->
-			nfs_stat(Error);
-		    ok ->
-			nfs_stat(ok)
-		end;
-	    error ->
-		nfs_stat(estale)
-	end,
+    R = nfsproc_rmdir(fh_arg(DirFH,State),
+		      string_arg(NameBin), State),
     {reply, R, State};
 
-handle_call_({nfsproc_readdir_2, {FH, <<Cookie:32/integer>>, Count}, _Client},
+handle_call_({nfsproc_readdir_2, {FH, Cookie, Count}, _Client},
 	    _From,
 	    State) ->
-    R = case fh2id(FH) of
-	    {ok, ID} ->
-		Mod = fh2mod(FH),
-		%% FIXME: handle big count + continuation
-		Loc = fh2local(FH,State),
-		case callback(Mod, readdir, [ID,Count,Loc]) of
-		    {error, ErrCode} ->
-			{nfs_stat(ErrCode), void};
-		    {ok, Names} ->
-			Entries = entries(Mod,fh2fsid(FH),ID,Names,
-					  Loc,State,Cookie),
-			{nfs_stat(ok), {Entries, true}}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_readdir(fh_arg(FH,State), Cookie, Count, State),
     {reply, R, State};
 
 handle_call_({nfsproc_statfs_2, FH, _C}, _From, State) ->
-    R = case fh2id(FH) of
-	    {ok, ID} ->
-		Mod = fh2mod(FH),
-		Loc = fh2local(FH,State),
-		case callback(Mod, statfs, [ID,Loc]) of
-		    {ok, Res = {_Tsize, _Bsize, _Blocks, _Bfree, _Bavail}} ->
-			{nfs_stat(ok), Res};
-		    {error, Reason} ->
-			{nfs_stat(Reason), void}
-		end;
-	    error ->
-		{nfs_stat(estale), void}
-	end,
+    R = nfsproc_statfs(fh_arg(FH,State), State),
     {reply, R, State};
 
 %% Local calls
@@ -592,23 +361,260 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%----------------------------------------------------------------------
 
-init_tabs() ->
-    ets:new(?fh_id_tab,    [named_table, public, set]),
-    ets:new(?id_fh_tab,    [named_table, public, set]),
-    ets:new(?fsid_mod_tab, [named_table, public, set]),
-    ets:new(?misc_tab,     [named_table, public, set]),
-    ets:insert(?misc_tab,  {next_fsid, 0}),
-    ok.
+%%
+%%    attrstat NFSPROC_GETATTR(fhandle)
+%%
+nfsproc_getattr({FH,ID,Mod,Loc}, _State) ->
+    case callback(Mod, getattr, [ID,Loc]) of
+	{ok, As} -> 
+	    {nfs_stat(ok),make_fattr(FH,As)};
+	{error,Error} ->
+	    {nfs_stat(Error), void}
+    end;
+nfsproc_getattr(error, _State) ->
+    {nfs_stat(estale), void}.
 
-make_suffix() ->
-    SufBits = (32 - 8) * 8,
-    {A,B,C} = now(),
-    S0 = A,
-    S1 = (S0 * 1000000) + B,
-    S2 = (S1 * 1000000) + C,
-    <<S2:SufBits/integer>>.
+%%
+%% attrstat NFSPROC_SETATTR(sattrargs)
+%%
+nfsproc_setattr({FH,ID,Mod,Loc}, Attrs, _State) ->
+    case callback(Mod, setattr, [ID,Attrs,Loc]) of
+	ok ->
+	    case callback(Mod, getattr, [ID,Loc]) of
+		{ok, As} -> 
+		    {nfs_stat(ok),make_fattr(FH,As)};
+		{error,Error} ->
+		    {nfs_stat(Error), void}
+	    end;
+	{error, Error} ->
+	    {nfs_stat(Error), void}
+    end;
+nfsproc_setattr(error, _Attrs, _State) ->
+    {nfs_stat(estale), void}.
+%%
+%%  diropres NFSPROC_LOOKUP(diropargs)
+%%
+nfsproc_lookup({DirFH,DirID,Mod,Loc}, Name, State) ->
+    case callback(Mod, lookup, [DirID,Name,Loc]) of
+	{error, Error} ->
+	    {nfs_stat(Error), void};
+	{ok, ChildID} ->
+	    {ok, ChildFH} = id2fh(ChildID,fh2fsid(DirFH),State),
+	    case callback(Mod, getattr, [ChildID,Loc]) of
+		{ok, As} -> 
+		    {nfs_stat(ok),{ChildFH,make_fattr(ChildFH,As)}};
+		{error, Error} ->
+		    {nfs_stat(Error), void}
+	    end
+    end;
+nfsproc_lookup(error, _NameBin, _State) ->
+    {nfs_stat(estale), void}.
+%%
+%% readlinkres NFSPROC_READLINK(fhandle)
+%%
+nfsproc_readlink({_FH,ID,Mod,Loc}, _State) ->
+    case callback(Mod, readlink, [ID,Loc]) of
+	{ok, Path} ->
+	    {nfs_stat(ok),erlang:iolist_to_binary(Path)};
+	{error, Reason} ->
+	    {nfs_stat(Reason), void}
+    end;
+nfsproc_readlink(error, _State) ->
+    {nfs_stat(estale), void}.
+%%
+%% readres NFSPROC_READ(readargs)          = 6;
+%%
+nfsproc_read({FH,ID,Mod,Loc},Offset,Count,TotalCount,_State) ->
+    case callback(Mod, read, [ID,Offset,Count,TotalCount,Loc]) of
+	{ok, IOList} ->
+	    case callback(Mod, getattr, [ID,Loc]) of
+		{ok, As} ->
+		    Data = erlang:iolist_to_binary(IOList),
+		    {nfs_stat(ok), {make_fattr(FH,As),Data}};
+		{error, Error} ->
+		    {nfs_stat(Error), void}
+	    end;
+	{error, Reason} ->
+	    {nfs_stat(Reason), void}
+    end;
+nfsproc_read(error,_Offset,_Count,_TotalCount,_State) ->
+    {nfs_stat(estale), void}.
+%%
+%% attrstat NFSPROC_WRITE(writeargs);
+%%
+nfsproc_write({FH,ID,Mod,Loc}, BeginOffset, Offset, 
+	      TotalCount, Data, _State) ->
+    case callback(Mod, write, [ID,BeginOffset,Offset,TotalCount,
+			       Data,Loc]) of
+	ok ->
+	    case callback(Mod, getattr, [ID,Loc]) of
+		{ok, As} ->
+		    {nfs_stat(ok), make_fattr(FH,As)};
+		{error, Error} ->
+		    {nfs_stat(Error), void}
+	    end;
+	{error, Reason} ->
+	    {nfs_stat(Reason), void}
+    end;
+nfsproc_write(error, _BeginOffset, _Offset, _TotalCount, _Data, _State) ->
+    {nfs_stat(estale), void}.
 
+%%
+%%   diropres NFSPROC_CREATE(createargs)
+%%
 
+nfsproc_create({DirFH,DirID,Mod,Loc},Name,Attr,State) ->
+    case callback(Mod, create, [DirID, Name, Attr, Loc]) of
+	{ok, ChildID} ->
+	    {ok, ChildFH} = id2fh(ChildID,fh2fsid(DirFH),State),
+	    case callback(Mod, getattr, [ChildID,Loc]) of
+		{ok, As} ->
+		    {nfs_stat(ok), {ChildFH, make_fattr(ChildFH,As)}};
+		{error, Error} ->
+		    {nfs_stat(Error), void}
+	    end;
+	{error, Error} ->
+	    {nfs_stat(Error), void}
+    end;
+nfsproc_create(error,_Name,_Attr,_State) ->
+    {nfs_stat(estale), void}.
+%%
+%%  stat NFSPROC_REMOVE(diropargs)
+%%
+
+nfsproc_remove({_DirFH,DirID,Mod,Loc}, Name, _State) ->
+    case callback(Mod, remove, [DirID, Name, Loc]) of
+	{error, Error} ->
+	    nfs_stat(Error);
+	ok ->
+	    nfs_stat(ok)
+    end;
+nfsproc_remove(error, _Name, _State) ->
+    nfs_stat(estale).
+
+%%
+%% stat NFSPROC_RENAME(renameargs)
+%%
+nfsproc_rename({_DirFromFH,DirFromID,Mod,Loc},From,
+	       {_DirToFH,DirToID,Mod,Loc},To,_State) ->
+    case callback(Mod, rename, [DirFromID,From,DirToID,To,Loc]) of
+	{error, Error} ->
+	    nfs_stat(Error);
+	ok ->
+	    nfs_stat(ok)
+    end;
+nfsproc_rename(error,_,_TArg,_To,_State) ->
+    nfs_stat(estale);
+nfsproc_rename(_FArg,_From, error,_To,_State) ->
+    nfs_stat(estale);
+nfsproc_rename(_FArg,_From,_TArg,_To, _State) ->
+    %% probably a mod mismatch, different filesystems
+    nfs_stat(enodev).
+%%
+%%   stat NFSPROC_LINK(linkargs)
+%%
+nfsproc_link({_FromFH,FromID,Mod,Loc},
+	     {_ToFH,ToID,Mod,Loc},ToName,_State) ->
+    case callback(Mod, link, [FromID,ToID,ToName,Loc]) of
+	{error, Error} ->
+	    nfs_stat(Error);
+	ok ->
+	    nfs_stat(ok)
+    end;
+nfsproc_link(error,_TArg,_To,_State) ->
+    nfs_stat(estale);
+nfsproc_link(_FArge,error,_To,_State) ->
+    nfs_stat(estale);
+nfsproc_link(_, _, _To, _State) ->
+    %% probably a mod mismatch, different filesystems
+    nfs_stat(enodev).
+%%
+%% stat NFSPROC_SYMLINK(symlinkargs)
+%%
+nfsproc_symlink({_FromFH,FromID,Mod,Loc},FromName,ToPath,SAttr,_State) ->
+    case callback(Mod, symlink, [FromID,FromName,ToPath,SAttr,Loc]) of
+	{error, Error} ->
+	    nfs_stat(Error);
+	ok ->
+	    nfs_stat(ok)
+    end;
+nfsproc_symlink(error,_,_,_SAttr,_State) ->
+    nfs_stat(estale).
+%%
+%% diropres NFSPROC_MKDIR(createargs)
+%%
+nfsproc_mkdir({ok,DirFH,DirID,Mod,Loc}, Name, Attr, State) ->
+    case callback(Mod, mkdir, [DirID, Name, Attr, Loc]) of
+	{error, Error} ->
+	    {nfs_stat(Error), void};
+	{ok, ChildID} ->
+	    {ok, ChildFH} = id2fh(ChildID,fh2fsid(DirFH),State),
+	    case callback(Mod, getattr, [ChildID,Loc]) of
+		{ok, As} ->
+		    {nfs_stat(ok), {ChildFH, make_fattr(ChildFH,As)}};
+		{error, Error} ->
+		    {nfs_stat(Error), void}
+	    end
+    end;
+nfsproc_mkdir(error,_Name,_Attr,_State) ->
+    {nfs_stat(estale), void}.
+%%
+%% stat NFSPROC_RMDIR(diropargs)
+%%
+nfsproc_rmdir({_DirFH,DirID,Mod,Loc}, Name, _State) ->
+    case callback(Mod, rmdir, [DirID,Name,Loc]) of
+	{error, Error} ->
+	    nfs_stat(Error);
+	ok ->
+	    nfs_stat(ok)
+    end;
+nfsproc_rmdir(error, _Name, _State) ->
+    nfs_stat(estale).
+%%
+%% readdirres NFSPROC_READDIR(readdirargs)
+%%
+
+nfsproc_readdir({FH,ID,Mod,Loc}, <<Cookie:32/integer>>, Count, State) ->
+    %% FIXME: handle big count + continuation
+    case callback(Mod, readdir, [ID,Count,Loc]) of
+	{error, ErrCode} ->
+	    {nfs_stat(ErrCode), void};
+	{ok, Names} ->
+	    Entries = entries(Mod,fh2fsid(FH),ID,Names,
+			      Loc,State,Cookie),
+	    {nfs_stat(ok), {Entries, true}}
+    end;
+nfsproc_readdir(error, _CookieBin,_Count,_State) ->
+    {nfs_stat(estale), void}.
+
+%%
+%% statfsres NFSPROC_STATFS(fhandle)
+%%
+nfsproc_statfs({_FH,ID,Mod,Loc}, _State) ->
+    case callback(Mod, statfs, [ID,Loc]) of
+	{ok, Res = {_Tsize, _Bsize, _Blocks, _Bfree, _Bavail}} ->
+	    {nfs_stat(ok), Res};
+	{error, Reason} ->
+	    {nfs_stat(Reason), void}
+    end;
+nfsproc_statfs(error,_State) ->
+    {nfs_stat(estale), void}.
+
+%% fh -> id,mod,state
+fh_arg(FH, State) ->
+    case fh2id(FH) of
+	{ok, ID} ->
+	    Mod = fh2mod(FH),
+	    Loc  = fh2local(FH,State),
+	    {FH,ID,Mod,Loc};
+	error ->
+	    error
+    end.
+
+string_arg(Bin) when is_binary(Bin) ->
+    binary_to_list(Bin).
+
+	
 callback(Mod, Func, Args) ->
     ?dbg("callback ~s:~s ~p\n", [Mod,Func,Args]),
     Res = (catch apply(Mod,Func,Args)),
@@ -621,13 +627,6 @@ callback(Mod, Func, Args) ->
 	    Res
     end.
 
-fattr(FH, Mod, State) ->
-    {ok,ID} = fh2id(FH),
-    Loc = fh2local(FH, State),
-    case callback(Mod, getattr, [ID,Loc]) of
-	{ok, As} -> {ok,make_fattr(FH,As)};
-	Error -> Error
-    end.
 
 entries(_Mod,_FSID,_DirID,[],_MState,_State,_N) ->
     void;
@@ -652,6 +651,16 @@ export_entries([#mount_ent{path=Path}|Es]) ->
     {erlang:iolist_to_binary(Path),
      Groups,
      export_entries(Es)}.
+
+
+make_suffix() ->
+    SufBits = (32 - 8) * 8,
+    {A,B,C} = now(),
+    S0 = A,
+    S1 = (S0 * 1000000) + B,
+    S2 = (S1 * 1000000) + C,
+    <<S2:SufBits/integer>>.
+
 
 id2fileid(ID,FSID,State) ->
     {ok, FH} = id2fh(ID,FSID,State),
