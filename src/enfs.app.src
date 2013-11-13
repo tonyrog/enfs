@@ -1,0 +1,9 @@
+{application, enfs,
+ [{description, "NFS v2 server written in erlang"},
+  {vsn, git},
+  {registered, [nfs_server]},
+  {mod,{enfs_app,[]}},
+  {env, []},
+  {applications,[kernel,stdlib]},
+  {modules, [MODULES]}
+  ]}.

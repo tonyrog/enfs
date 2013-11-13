@@ -8,7 +8,7 @@
 -module(nfs_procfs).
 -author('luke@bluetail.com').
 
--export([start_link/0]).
+-export([command/1, start/1]).
 
 -behaviour(nfs_server).
 
@@ -36,17 +36,16 @@
 	  root = root
 	}).
 
-start_link() ->
-    Pid = case nfs_server:start_link() of
-	      {ok,Pid0} -> Pid0;
-	      {error,{already_started,Pid0}} -> Pid0
-	  end,
-    ok = nfs_server:add_mountpoint("/procfs", ?MODULE, []),
-    {ok, Pid}.
+command([]) ->
+    start([]).
+
+start(Options) ->
+    application:start(enfs),
+    ok = nfs_server:add_mountpoint("/procfs", ?MODULE, Options).
 
 %% Returns: ID of root directory, any erlang term.
 init(Options) ->
-    {root, #procfs_state{ options=Options}}.
+    {root, #procfs_state{ options=Options } }.
 
 terminate(#procfs_state{}) ->
     ok.

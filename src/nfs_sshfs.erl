@@ -7,8 +7,7 @@
 
 -module(nfs_sshfs).
 
--export([command/1, start_link/1]).
-
+-export([command/1, start/1]).
 -behaviour(nfs_server).
 
 
@@ -46,19 +45,16 @@
 command([HostArg,RootArg]) ->
     Root = to_list(RootArg),
     Host = to_list(HostArg),    
-    start_link([{root,Root},{host,Host}]).
+    start([{root,Root},{host,Host}]).
 
-start_link(Options) ->
+start(Options) ->
     application:start(crypto),
     application:start(asn1),
     application:start(public_key),
     application:start(ssh),
-    Pid = case nfs_server:start_link() of
-	      {ok,Pid0} -> Pid0;
-	      {error,{already_started,Pid0}} -> Pid0
-	  end,
-    ok = nfs_server:add_mountpoint("/sshfs", ?MODULE, Options),
-    {ok, Pid}.
+    application:start(enfs),
+    ok = nfs_server:add_mountpoint("/sshfs", ?MODULE, Options).
+
 
 to_list(X) when is_atom(X) -> atom_to_list(X);
 to_list(X) when is_binary(X) -> binary_to_list(X);
@@ -179,8 +175,7 @@ create(Dir,File, SAttr,St) ->
 		Error ->
 		    Error
 	    end;
-	{ok,_FI} ->
-	    {ok, Filename};
+	{ok,_FI} -> {error,exist};
 	Error -> Error
     end.
 

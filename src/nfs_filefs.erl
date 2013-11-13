@@ -7,8 +7,7 @@
 
 -module(nfs_filefs).
 
-
--export([start_link/0, start_link/1]).
+-export([command/1, start/1]).
 
 -behaviour(nfs_server).
 
@@ -35,29 +34,43 @@
 -record(filefs_state,
 	{
 	  options = [],
-	  root = "/tmp"
+	  %% simulate slow read/write (like 4,8 ms for a spinning disk)
+	  read_delay = 0,    %% ms to sleep in read operation
+	  write_delay = 0,   %% ms to sleep in write operation
+	  root
 	}).
 
 -define(UNDEF32, 16#ffffffff).
 
-start_link() ->
-    start_link([filename:join(os:getenv("HOME"), "tmp")]).
+command([RootArg]) ->
+    Root = to_list(RootArg),
+    start([{root,Root}]);
+command([RootArg,WriteDelay,ReadDelay]) ->
+    Root = to_list(RootArg),
+    WrDelay = to_integer(WriteDelay),
+    RdDelay = to_integer(ReadDelay),
+    start([{root,Root},{write_delay,WrDelay},
+	   {read_delay,RdDelay}]).
 
-start_link([RootArg]) ->
-    Pid = case nfs_server:start_link() of
-	      {ok,Pid0} -> Pid0;
-	      {error,{already_started,Pid0}} -> Pid0
-	  end,
-    Root = if is_atom(RootArg) -> atom_to_list(RootArg);
-	      is_list(RootArg) -> RootArg;
-	      is_binary(RootArg) -> binary_to_list(RootArg)
-	   end,
-    ok = nfs_server:add_mountpoint("/filefs", ?MODULE, [{root,Root}]),
-    {ok, Pid}.
+start(Options) ->
+    application:start(enfs),
+    ok = nfs_server:add_mountpoint("/filefs", ?MODULE, Options).
+
+to_list(X) when is_atom(X) -> atom_to_list(X);
+to_list(X) when is_binary(X) -> binary_to_list(X);
+to_list(X) when is_list(X) -> X.
+
+to_integer(X) when is_atom(X) -> list_to_integer(atom_to_list(X));
+to_integer(X) when is_list(X) -> list_to_integer(X);
+to_integer(X) when is_binary(X) -> binary_to_integer(X).
 
 init(Options) ->
+    WriteDelay = proplists:get_value(write_delay, Options, 0),
+    ReadDelay = proplists:get_value(read_delay, Options, 0),
     Root = proplists:get_value(root, Options, "/tmp"),
-    {Root, #filefs_state { options=Options, root=Root }}.
+    {Root, #filefs_state { options=Options, root=Root,
+			   write_delay = WriteDelay,
+			   read_delay  = ReadDelay }}.
 
 terminate(#filefs_state {}) ->   
     ok.
@@ -115,22 +128,24 @@ readlink(LinkName, _St) ->
     file:read_link(LinkName).
 
 %% fixme: cache open files for a while?
-read(FileName, Offset, Count, _TotalCount, _St) ->
+read(FileName, Offset, Count, _TotalCount, St) ->
     case file:open(FileName, [read,binary]) of
 	{ok,Fd} ->
 	    Res = file:pread(Fd, Offset, Count),
 	    file:close(Fd),
+	    timer:sleep(St#filefs_state.read_delay),
 	    Res;
 	Error ->
 	    Error
     end.
     
 %% fixme: cache open files for a while?
-write(FileName,_BeginOffset,Offset,_TotalCount,Data, _St) ->
+write(FileName,_BeginOffset,Offset,_TotalCount,Data, St) ->
     case file:open(FileName, [read,write,binary]) of
 	{ok,Fd} ->
 	    Res = file:pwrite(Fd, Offset, Data),
 	    file:close(Fd),
+	    timer:sleep(St#filefs_state.write_delay),
 	    Res;
 	Error ->
 	    Error
@@ -138,15 +153,20 @@ write(FileName,_BeginOffset,Offset,_TotalCount,Data, _St) ->
 
 create(Dir, File, SAttr, _St) ->
     Filename = filename:join(Dir,File),
-    case file:open(Filename, [read,write,binary]) of
-	{ok,Fd} ->
-	    file:close(Fd),
-	    case setattr(Filename, SAttr,_St) of
-		ok -> {ok, Filename};
-		Error -> Error
+    case file:read_file_info(Filename) of
+	{error, enoent} ->
+	    case file:open(Filename, [write,binary]) of
+		{ok,Fd} ->
+		    file:close(Fd),
+		    case setattr(Filename, SAttr,_St) of
+			ok -> {ok, Filename};
+			Error -> Error
+		    end;
+		Error ->
+		    Error
 	    end;
-	Error ->
-	    Error
+	{ok,_Fi} ->
+	    {error,exist}
     end.
 
 remove(Dir, File, _St) ->    

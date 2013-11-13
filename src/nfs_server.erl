@@ -13,7 +13,10 @@
 -include("nfs.hrl").
 
 %% External exports
--export([start_link/0, add_mountpoint/3]).
+-export([add_mountpoint/3]).
+
+-export([start/0]).
+-export([start_link/0,start_link/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, 
@@ -105,40 +108,48 @@ behaviour_info(_) ->
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
+
+start() ->
+    application:start(nfs_server).
+
 start_link() ->
-    gen_server:start_link({local, nfs_server}, nfs_server, [], []).
+    start_link([]).
+
+start_link(Args) ->
+    gen_server:start_link({local, nfs_server}, nfs_server, Args, []).
 
 add_mountpoint(Path, Module, Opts) ->
     gen_server:call(?MODULE, {add_mountpoint, Path, Module, Opts}).
 
-
+%% @private
 start_mountd() ->
     {ok, _Pid} = rpc_server:start_link({local, nfs_mountd},
-				      [{udp, any, ?MOUNTD_PORT, false, []}],
-				      ?MOUNTPROG,
-				      mountprog,
-				      ?MOUNTVERS,
-				      ?MOUNTVERS,
-				      nfs_svc,
-				      do_init).
+				       [{udp, any, ?MOUNTD_PORT, false, []}],
+				       ?MOUNTPROG,
+				       mountprog,
+				       ?MOUNTVERS,
+				       ?MOUNTVERS,
+				       nfs_svc,
+				       do_init).
 
+%% @private
 start_nfsd() ->
     {ok, _Pid} = rpc_server:start_link({local, nfs_rpc_nfsd},
-				      [{udp, any, ?NFS_PORT, false, []}],
-				      ?NFS_PROGRAM,
-				      nfs_program,
-				      ?NFS_VERSION,
-				      ?NFS_VERSION,
-				      nfs_svc,
-				      []).
+				       [{udp, any, ?NFS_PORT, false, []}],
+				       ?NFS_PROGRAM,
+				       nfs_program,
+				       ?NFS_VERSION,
+				       ?NFS_VERSION,
+				       nfs_svc,
+				       []).
 
 
 %%%----------------------------------------------------------------------
 %%% Callback functions from gen_server
 %%%----------------------------------------------------------------------
 
-init([]) ->
-    ?dbg("starting", []),
+init(_Args) ->
+    ?dbg("starting args=~w", [_Args]),
     start_mountd(),
     start_nfsd(),
     ets:new(?fh_id_tab,    [named_table, public, set]),
@@ -347,6 +358,7 @@ handle_cast(_Msg, State) ->
     ?dbg("handle_cast got ~p\n", [_Msg]),
     {noreply, State}.
 
+%% we may get {tcp_new,Sock} and {tcp_close,Sock} here ?
 handle_info(_Info, State) ->
     ?dbg("handle_info got ~p\n", [_Info]),
     {noreply, State}.
@@ -543,7 +555,7 @@ nfsproc_symlink(error,_,_,_SAttr,_State) ->
 %%
 %% diropres NFSPROC_MKDIR(createargs)
 %%
-nfsproc_mkdir({ok,DirFH,DirID,Mod,Loc}, Name, Attr, State) ->
+nfsproc_mkdir({DirFH,DirID,Mod,Loc}, Name, Attr, State) ->
     case callback(Mod, mkdir, [DirID, Name, Attr, Loc]) of
 	{error, Error} ->
 	    {nfs_stat(Error), void};
