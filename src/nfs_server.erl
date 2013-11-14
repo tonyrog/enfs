@@ -24,11 +24,16 @@
 
 -export([behaviour_info/1]).
 
--define(dbg(F,A), io:format("~s:~w "++(F)++"\n",[?MODULE,?LINE|(A)])).
+-define(dbg(F,A),
+	case get(debug) of
+	    true -> io:format("~s:~w "++(F)++"\n",[?MODULE,?LINE|(A)]);
+	    _ -> ok
+	end).
 %% -define(dbg(F,A), ok).
 
--define(MOUNTD_PORT, 22050).		% arbitrary
--define(NFS_PORT, 22049).		% normal port + 20000
+-define(NFS_PORT,    22049).	  %% normal port + 20000
+-define(MOUNTD_PORT, 22050).	  %% arbitrary
+-define(KLM_PORT,    22045).      %% normal + 20000
 
 %% NFS identifies files by a "file handle", which is a fixed-length
 %% opaque binary. This program's file handles look like this:
@@ -41,10 +46,11 @@
 
 %% These tables are mappings. fh_id_tab maps file handles onto
 %% identifying terms, etc.
--define(fh_id_tab, nfs_fh_id).         %% FileID   => FH
--define(id_fh_tab, nfs_id_fh).         %% FH       => FileID
--define(fsid_mod_tab, nfs_fsid_mod).   %% FSID     => Module
--define(misc_tab,     nfs_misc).       %% counters next_fsid, {next_fileid,FSID}
+-define(fh_id_tab,    nfs_fh_id).         %% FileID   => FH
+-define(id_fh_tab,    nfs_id_fh).         %% FH       => FileID
+-define(lock_fh_tab,  nfs_lock_fh).       %% FH       => Lock
+-define(fsid_mod_tab, nfs_fsid_mod).      %% FSID     => Module
+-define(misc_tab,     nfs_misc).          %% counters
 
 %% fattr modes
 -define(MODE_DIR,     8#0040000).
@@ -79,6 +85,11 @@
 	  fh_suffix,        %% filehandle suffix in use
 	  mountpoints = [] :: [#mount_ent{}],
 	  locals :: dict()  %% dict: fsid -> localstate()
+	 }).
+
+-record(lock, {
+	  exclusive = false :: boolean(),
+	  rs = [] :: [{Owner::integer(),Offset::integer(),Len::integer()}]
 	 }).
 
 -spec behaviour_info(Arg::callbacks) -> 
@@ -143,17 +154,30 @@ start_nfsd() ->
 				       nfs_svc,
 				       []).
 
+%% @private
+start_klm() ->
+    {ok, _Pid} = rpc_server:start_link({local, nfs_klm},
+ 				       [{udp, any, ?KLM_PORT, false, []}],
+ 				       ?KLM_PROG,
+ 				       klmprog,
+ 				       ?KLM_VERS,
+ 				       ?KLM_VERS,
+ 				       nfs_svc,
+ 				       []).
 
 %%%----------------------------------------------------------------------
 %%% Callback functions from gen_server
 %%%----------------------------------------------------------------------
 
-init(_Args) ->
-    ?dbg("starting args=~w", [_Args]),
+init(Args) ->
+    put(debug, proplists:get_bool(debug, Args)),
+    ?dbg("starting args=~w", [Args]),
     start_mountd(),
     start_nfsd(),
+    %% start_klm(),  NOT YET
     ets:new(?fh_id_tab,    [named_table, public, set]),
     ets:new(?id_fh_tab,    [named_table, public, set]),
+    ets:new(?lock_fh_tab,  [named_table, public, set]),
     ets:new(?fsid_mod_tab, [named_table, public, set]),
     ets:new(?misc_tab,     [named_table, public, set]),
     ets:insert(?misc_tab,  {next_fsid, 0}),
@@ -340,6 +364,98 @@ handle_call_({nfsproc_readdir_2, {FH, Cookie, Count}, _Client},
 
 handle_call_({nfsproc_statfs_2, FH, _C}, _From, State) ->
     R = nfsproc_statfs(fh_arg(FH,State), State),
+    {reply, R, State};
+
+%% 
+%%  klm_testrply	KLM_TEST (klm_testargs)
+%%
+handle_call_({klm_test_1,TestArgs,_Client}, _From, State) ->
+    {_Exclusive,Lock} = TestArgs,
+    {_ServerName,FH,Pid,L_Offset,L_Len} = Lock,
+    Range = {Pid,L_Offset,L_Len},
+    R = case ets:lookup(?lock_fh_tab, FH) of
+	    [] ->
+		{reply, void, State};
+	    [L] ->
+		%% FIXME: check more cases 
+		case find_lock(Range,L#lock.rs) of
+		    false ->
+			{reply, void, State};
+		    {Pid,_Offset,_Len} -> %% Pid is owner
+			{reply, void, State};
+		    {_Pid1,Offset,Len} ->
+			Holder = {L#lock.exclusive,Pid,Offset,Len},
+			{denied,Holder}
+		end
+	end,
+    {reply, R, State};
+
+%%
+%%  klm_stat KLM_LOCK (klm_lockargs)
+%%
+handle_call_({klm_lock_1,LockArgs,_Client}, _From, State) ->
+    {_Block,Exclusive,Lock} = LockArgs,
+    {_ServerName,FH,Pid,L_Offset,L_Len} = Lock,
+    Range = {Pid,L_Offset,L_Len},
+    R = case ets:lookup(?lock_fh_tab, FH) of
+	    [] ->
+		L = #lock { exclusive=Exclusive, rs = [Range]},
+		ets:insert(?lock_fh_tab, {FH,L}),
+		{reply, 'klm_granted', State};
+	    [L] when L#lock.rs =:= [] ->
+		L = #lock { exclusive=Exclusive, rs = [Range]},
+		ets:insert(?lock_fh_tab, {FH,L}),
+		{reply, 'klm_granted', State};
+	    [L] when L#lock.exclusive ->		
+		case L#lock.rs of
+		    [{Pid,_,_}|_] ->
+			L1 = L#lock { rs = [Range | L#lock.rs] },
+			ets:insert(?lock_fh_tab, {FH,L1}),
+			{reply, 'klm_granted', State};
+		    [_|_] ->
+			{reply, 'klm_denied', State}
+		end;
+	    [L] -> %% shared
+		case find_lock(Range,L#lock.rs) of
+		    false ->
+			L1 = L#lock { rs = [Range | L#lock.rs] },
+			ets:insert(?lock_fh_tab, {FH,L1}),
+			{reply, 'klm_granted', State};
+		    {Pid,_Offs,_Len} -> %% allow overlap from same owner
+			L1 = L#lock { rs = [Range | L#lock.rs] },
+			ets:insert(?lock_fh_tab, {FH,L1}),
+			{reply, 'klm_granted', State};
+		    {_Pid1,_Offs1,_Len1} ->
+			{reply, 'klm_denied', State}
+		end
+	end,
+    {reply, R, State};
+
+%%
+%%  klm_stat KLM_CANCEL (klm_lockargs)
+%%
+handle_call_({klm_cancel_1,_KlmLockArgs,_Client}, _From, State) ->
+    %% FIXME
+    {reply, 'klm_granted', State};
+
+%%
+%%  klm_stat KLM_UNLOCK (klm_unlockargs)
+%%
+handle_call_({klm_unlock_1,KlmUnLockArgs,_Client}, _From, State) ->
+    {_ServerName,FH,Pid,L_Offset,L_Len} = KlmUnLockArgs,
+    Range = {Pid,L_Offset,L_Len},
+    R = case ets:lookup(?lock_fh_tab, FH) of
+	    [] -> {reply, 'klm_denied_nolock', State};
+	    [L] ->
+		case remove_matching_locks(Range, L#lock.rs) of
+		    {0,_Rs} -> %% nothing removed
+			{reply, 'klm_denied_nolock', State};
+		    {_N,Rs1} ->
+			L1 = L#lock { rs = Rs1},
+			ets:insert(?lock_fh_tab, {FH,L1}),
+			{reply, 'klm_granted', State}
+		end
+	end,
     {reply, R, State};
 
 %% Local calls
@@ -804,6 +920,35 @@ access([x|A]) -> ?MODE_OX bor access(A);
 access([w|A]) -> ?MODE_OW bor access(A);
 access([r|A]) -> ?MODE_OR bor access(A);
 access([]) -> 0.
+
+find_lock({Pid,Offset,Length},Rs) ->
+    find_lock_(Pid,Offset,Offset+Length-1,Rs).
+
+find_lock_(Pid,P1,P2,[R1={_Pid1,P3,L3}|Rs]) ->
+    X1 = max(P1,P3),
+    X2 = min(P2,P3+L3-1),
+    if X1 > X2 -> find_lock_(Pid,P1,P2,Rs);
+       true -> R1
+    end;
+find_lock_(_Pid,_P1,_P2,[]) ->
+    false.
+
+remove_matching_locks({Pid,Offset,Length}, Rs) ->
+    remove_matching_locks_(Pid,Offset,Offset+Length-1,Rs,0,[]).
+
+remove_matching_locks_(Pid,P1,P2,[R1={Pid1,P3,L3}|Rs],N,Acc) ->
+    X1 = max(P1,P3),
+    X2 = min(P2,P3+L3-1),
+    if X1 > X2 ->
+	    remove_matching_locks_(Pid,P1,P2,Rs,N,[R1|Acc]);
+       Pid =:= Pid1 ->
+	    remove_matching_locks_(Pid,P1,P2,Rs,N+1,Acc);
+       true ->
+	    remove_matching_locks_(Pid,P1,P2,Rs,N,[R1|Acc])
+    end;
+remove_matching_locks_(_Pid,_P1,_P2,[],N,Acc) ->
+    {N,Acc}.
+
 
 
 nfs_stat(ok)   -> 'NFS_OK';	                %% no error
