@@ -28,7 +28,6 @@
 
 %% external exports
 -export([start_link/0, 
-	 start_link/1, 
 	 stop/0]).
 
 %% supervisor callbacks
@@ -37,13 +36,6 @@
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
-start_link(Args) ->
-    case supervisor:start_link({local, ?MODULE}, ?MODULE, Args) of
-	{ok, Pid} ->
-	    {ok, Pid, {normal, Args}};
-	Error -> 
-	    Error
-    end.
 
 start_link() ->
     supervisor:start_link({local,?MODULE}, ?MODULE, []).
@@ -57,8 +49,8 @@ stop() ->
 
 %%----------------------------------------------------------------------
 %%----------------------------------------------------------------------
-init(Args) ->
-    NfsServer = {nfs_server, {nfs_server, start_link, [Args]},
+init(_Args) ->
+    NfsServer = {nfs_server, {nfs_server, start_link, []},
 		 permanent, 5000, worker, [nfs_server]},
 %%    FsSup = {fs_sup, {fs_sup, start_link, []},
 %%		 permanent, 5000, worker, [fs_sup]},

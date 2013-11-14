@@ -204,7 +204,7 @@ rmdir(DirName, Name, _St) ->
 
 %% FIXME:
 statfs(_ID,_St) ->
-    {ok, {1024, 1024, 1024, 0, 0}}.
+    {ok, {1024, 1024, 1024*1024, 1024*1024, 1024*1024}}.
 
 datetime_to_unix_seconds(DateTime) ->
     Secs = calendar:datetime_to_gregorian_seconds(DateTime),
