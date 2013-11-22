@@ -14,6 +14,7 @@
 
 %% External exports
 -export([add_mountpoint/3]).
+-export([debug/1]).
 
 -export([start/0]).
 -export([start_link/0,start_link/1]).
@@ -129,6 +130,9 @@ start_link() ->
 start_link(Args) ->
     gen_server:start_link({local, nfs_server}, nfs_server, Args, []).
 
+debug(On) when is_boolean(On) ->
+    gen_server:call(?MODULE, {debug, On}).
+
 add_mountpoint(Path, Module, Opts) ->
     gen_server:call(?MODULE, {add_mountpoint, Path, Module, Opts}).
 
@@ -169,7 +173,8 @@ start_klm() ->
 %%% Callback functions from gen_server
 %%%----------------------------------------------------------------------
 
-init(Args) ->
+init(Args0) ->
+    Args = Args0 ++ application:get_all_env(enfs),
     put(debug, proplists:get_bool(debug, Args)),
     ?dbg("starting args=~w", [Args]),
     start_mountd(),
@@ -464,6 +469,10 @@ handle_call_({add_mountpoint, Path, Mod, Opts}, _From, State) ->
     Ent = #mount_ent { path=Path, mod=Mod, opts=Opts },
     Ms = [Ent|State#state.mountpoints],
     {reply, ok, State#state{ mountpoints=Ms }};
+
+handle_call_({debug, On}, _From, State) ->
+    put(debug, On),
+    {reply, ok, State};
 
 handle_call_(Request, _From, State) ->
     io:format("Undefined callback: ~p~n", [Request]),

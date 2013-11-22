@@ -50,11 +50,7 @@
 %% @end
 %%--------------------------------------------------------------------
 start(_StartType, _StartArgs) ->
-    Args = case application:get_env(enfs, arguments) of
-	       undefined -> [];
-	       {ok,As} -> As
-	   end,
-    enfs_sup:start_link(Args).
+    enfs_sup:start_link().
 
 %%--------------------------------------------------------------------
 %% @doc
