@@ -94,16 +94,41 @@ getattr(File, _St) ->
 	    Error
     end.
 
-setattr(Filename, _SAttrs={Mode,Uid,Gid,Size,Atime,Mtime}, _St) ->
+setattr(Filename, SAttrs, St) ->
+    setattr_(undefined, Filename, SAttrs, St).
+
+setattr_(Fd, Filename, _SAttrs={Mode,Uid,Gid,Size,Atime,Mtime}, St) ->
+    Size1 = aval(Size),
+    set_file_size(Fd, Filename, Size1, St),
     FI = #file_info {
 	    mode = aval(Mode),
 	    uid = aval(Uid),
 	    gid = aval(Gid),
-	    size = aval(Size),  %% truncate/fill?
+	    size = Size1,
 	    atime = tval(Atime),
 	    mtime = tval(Mtime)
 	   },
     file:write_file_info(Filename, FI).
+
+set_file_size(_Fd, _Filename, undefined, _St) ->
+    ok;
+set_file_size(undefined, Filename, Size, St) ->
+    case file:open(Filename, [read,write]) of
+	{ok,Fd} ->
+	    Res = set_file_size(Fd, Filename, Size, St),
+	    file:close(Fd),
+	    Res;
+	Error ->
+	    Error
+    end;
+set_file_size(Fd, _Filename, Size, _St) ->
+    %% St may be used later to access file cache
+    case file:position(Fd, Size) of
+	{ok,_Pos} ->
+	    file:truncate(Fd);
+	Error -> Error
+    end.
+
 
 tval({?UNDEF32,?UNDEF32}) -> undefined;
 tval({Sec,USec}) -> 
@@ -151,14 +176,15 @@ write(FileName,_BeginOffset,Offset,_TotalCount,Data, St) ->
 	    Error
     end.
 
-create(Dir, File, SAttr, _St) ->
+create(Dir, File, SAttr, St) ->
     Filename = filename:join(Dir,File),
     case file:read_file_info(Filename) of
 	{error, enoent} ->
 	    case file:open(Filename, [write,binary]) of
 		{ok,Fd} ->
+		    R = setattr_(Fd, Filename, SAttr, St),
 		    file:close(Fd),
-		    case setattr(Filename, SAttr,_St) of
+		    case R of
 			ok -> {ok, Filename};
 			Error -> Error
 		    end;
@@ -181,18 +207,18 @@ rename(DirFrom, NameFrom, DirTo, NameTo, _St) ->
 link(FromFileName, ToDir, ToName, _St) ->
     file:make_link(FromFileName,filename:join(ToDir,ToName)).
 
-symlink(FromDir, FromName, Existing, SAttr, _St) ->
+symlink(FromDir, FromName, Existing, SAttr, St) ->
     New = filename:join(FromDir,FromName),
     case file:make_symlink(Existing, New) of
-	ok -> setattr(New, SAttr,_St);
+	ok -> setattr_(undefined, New, SAttr, St);
 	Error -> Error
     end.
 
-mkdir(ParentName, Name, SAttr, _St) ->
+mkdir(ParentName, Name, SAttr, St) ->
     DirName = filename:join(ParentName, Name),
     case file:make_dir(DirName) of
 	ok -> 
-	    case setattr(DirName, SAttr,_St) of
+	    case setattr_(undefined, DirName, SAttr, St) of
 		ok -> {ok, DirName};
 		Error -> Error
 	    end;
