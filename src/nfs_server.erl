@@ -331,7 +331,7 @@ handle_call_({nfsproc_remove_2, {DirFH, NameBin}, _Client},_From, State) ->
     R = nfsproc_remove(fh_arg(DirFH,State),string_arg(NameBin), State),
     {reply, R, State};
 
-handle_call_({nfsproc_rename_2,{DirFromFH,FromBin},{DirToFH,ToBin},_Client},
+handle_call_({nfsproc_rename_2,{{DirFromFH,FromBin},{DirToFH,ToBin}},_Client},
 	     _From, State) ->
     R = nfsproc_rename(fh_arg(DirFromFH,State),string_arg(FromBin),
 		       fh_arg(DirToFH,State),string_arg(ToBin),State),
